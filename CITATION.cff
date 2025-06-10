@@ -3,9 +3,8 @@ message: "Country borders or names do not necessarily reflect the World Bank Gro
 title: "World Bank Data Lab Project Template"
 authors:
   - affiliation: World Bank
-    family-names: Stefanini Vicente
-    given-names: Gabriel
-    orcid: https://orcid.org/0000-0001-6530-3780
+    family-names: Stewart
+    given-names: Benjamin
 keywords:
   - Open Science
-repository-code: https://github.com/worldbank/template/tree/main
+repository-code: https://github.com/worldbank/wb-gad
