@@ -42,6 +42,102 @@ def get_wb_classifications(grouping_version='38.0', fmr_prod_base_url = "https:/
     )
     return(res_split)
 
+def get_wb_classifications_strict(
+    grouping_version="38.0",
+    region_version="2.0",
+    income_version="2.0",
+    fmr_prod_base_url="https://fmr.worldbank.org/FMR/sdmx/v2/structure/",
+    type_to_keep=("CONTINENT", "REGION", "INCOME"),
+):
+    """
+    Fetch World Bank classifications (continent, region, income) mapped to ISO3 codes.
+
+    Parameters
+    ----------
+    grouping_version : str, optional
+        Version of the World Bank reference area groups hierarchy. Default is "38.0"
+        (corresponding to FY26).
+    region_version : str, optional
+        Version of the World Bank regions hierarchy. Default is "2.0".
+    income_version : str, optional
+        Version of the World Bank income groups hierarchy. Default is "2.0".
+    fmr_prod_base_url : str, optional
+        Base URL for accessing the World Bank FMR SDMX structures. Default is
+        "https://fmr.worldbank.org/FMR/sdmx/v2/structure/".
+    type_to_keep : tuple of str, optional
+        Classification types to keep in the final table. Default is
+        ("CONTINENT", "REGION", "INCOME").
+
+    Returns
+    -------
+    pandas.DataFrame
+        A wide-format dataframe containing ISO3 country codes as rows and selected
+        classification types (e.g., CONTINENT, REGION, INCOME) as columns.
+    """
+
+    ref_area_groups_url = (
+        f"{fmr_prod_base_url}hierarchy/WB/H_REF_AREA_GROUPS/{grouping_version}?format=fusion-json"
+    )
+    region_hierarchy_url = (
+        f"{fmr_prod_base_url}hierarchy/WB/H_WB_REGIONS/{region_version}?format=fusion-json"
+    )
+    income_hierarchy_url = (
+        f"{fmr_prod_base_url}hierarchy/WB/H_WB_INCOME/{income_version}?format=fusion-json"
+    )
+
+    # Parse H_REF_AREA_GROUPS hierarchy
+    response = requests.get(ref_area_groups_url).json()
+    code_data = [
+        {"Code_URN": sub2["urn"].split(")")[-1]}
+        for item in response["Hierarchy"][0]["codes"]
+        for sub in item.get("codes", [])
+        for sub2 in sub.get("codes", [])
+    ]
+
+    # Split URNs into structured columns
+    res_split = (
+        pd.DataFrame(code_data)["Code_URN"]
+        .str.split(".", expand=True)
+        .rename(columns={1: "group", 2: "value", 3: "ISO3"})
+        .drop(columns=[0])
+    )
+
+    # Get valid region codes 
+    region_response = requests.get(region_hierarchy_url).json()
+    region_codes = [
+        sub["id"]
+        for item in region_response["Hierarchy"][0]["codes"]
+        for sub in item.get("codes", [])
+    ]
+
+    # Get valid income codes 
+    income_response = requests.get(income_hierarchy_url).json()
+    income_codes = [item["id"] for item in income_response["Hierarchy"][0]["codes"]]
+
+    # Filter invalid REGION / INCOME values 
+    filters = {
+        "REGION": set(region_codes),
+        "INCOME": set(income_codes),
+    }
+    for grp, valid_values in filters.items():
+        res_split = res_split[
+            ~((res_split["group"] == grp) & (~res_split["value"].isin(valid_values)))
+        ]
+
+    # Pivot to wide format
+    wide = (
+        res_split.pivot_table(
+            index="ISO3",
+            columns="group",
+            values="value",
+            aggfunc=lambda x: ",".join(sorted(set(x))),
+        )
+        .reset_index()
+    )
+
+    # Keep only requested groups
+    return wide[["ISO3"] + [col for col in type_to_keep if col in wide.columns]]
+
 def merge_id_columns(in_df, col_defs, drop_orig=False):
     """ Combine the two columns in col_defs 
 
