@@ -212,7 +212,40 @@ def evaluate_duplicate_names(in_df, name_col, parent_col, log_file):
                 pass                
     sys.stdout = original_stdout
 
+def write_output(gdf, final_folder, filename):
+    """ Write a GeoDataFrame to a better format (GPKG).
 
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        GeoDataFrame to write
+    out_folder : str
+        folder in which to write the file
+    out_name : str
+        name of the output file (without extension)
+
+    Returns
+    ----------
+    str
+        path to the written file       
+    """
+    # Write to multiple formats
+    # write geopackage to file
+    gdf.to_file(os.path.join(final_folder, "gpkg", f"{filename}.gpkg"), driver='GPKG')
+    # write shapefile to file
+    gdf.to_file(os.path.join(final_folder, "shp", f"{filename}.shp"), driver='ESRI Shapefile')
+    # Write geojson to file
+    gdf.to_file(os.path.join(final_folder, "geojson", f"{filename}.geojson"), driver='GeoJSON')
+
+    # Project to equal-are projection; epsg: 8857
+    gdf = gdf.to_crs(epsg=8857)
+    gdf.to_file(os.path.join(final_folder, "gpkg", f"{filename}_equal_area.gpkg"), driver='GPKG')
+    gdf.to_file(os.path.join(final_folder, "shp", f"{filename}_equal_area.shp"), driver='ESRI Shapefile')
+    gdf.to_file(os.path.join(final_folder, "geojson", f"{filename}_equal_area.geojson"), driver='GeoJSON')
+
+''' RETIRED
+Functions Below will hopefully be deleted eventually
+'''
 def open_and_write_to_better_formats(filename, out_folder):
     """ RETIRED Open a GeoDataFrame and write it to a better format (GPKG) if it doesn't already exist.
 
