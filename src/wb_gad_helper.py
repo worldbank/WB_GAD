@@ -6,6 +6,7 @@ import geopandas as gpd
 import pandas as pd
 
 from shapely.geometry import Point, Polygon, box, shape
+from datetime import datetime
 
 def get_wb_classifications(grouping_version='38.0', fmr_prod_base_url = "https://fmr.worldbank.org/FMR/sdmx/v2/structure/"): 
     """ Extract official World Bank regions and income classifications from Data360
@@ -181,8 +182,9 @@ def check_duplicates(in_df, id_col, out_file):
     print(f"{id_col} duplicates: {adm1_dups}")
     if adm1_dups > 0:
         # write duplicated records in adm1 and adm2 to QA/QC folder
-        adm1_dups = in_df[merged_adm1.duplicated(subset=[id_col], keep=False)]
+        adm1_dups = in_df[in_df.duplicated(subset=[id_col], keep=False)]
         adm1_dups.to_file(out_file, driver='GPKG')
+    return(adm1_dups)
 
 def evaluate_duplicate_names(in_df, name_col, parent_col, log_file):
     """ Group features by a parent_col and check if any names are duplicated
@@ -212,6 +214,84 @@ def evaluate_duplicate_names(in_df, name_col, parent_col, log_file):
                 pass                
     sys.stdout = original_stdout
 
+def evaluate_data_completeness(in_df, cols_to_check, log_file):
+    """ Check for missing values in specified columns of a GeoDataFrame
+
+    Parameters
+    ----------
+    in_df : geopandas.GeoDataFrame
+        administrative bounds of interest
+    cols_to_check : list
+        list of columns to check for missing values
+    log_file : str
+        path to the log file where completeness results will be recorded
+    """
+    original_stdout = sys.stdout
+    with open(log_file, 'a') as log_fh:
+        # write the current date and time
+        log_fh.write(f"Date and Time: {datetime.now()}\n")
+        log_fh.write(f"\nEvaluating data completeness for columns: {', '.join(cols_to_check)}\n")
+        log_fh.write("--------------------------------------------------\n")
+        sys.stdout = log_fh
+        for col in cols_to_check:
+            missing_count = in_df[col].isnull().sum()
+            total_count = len(in_df)
+            completeness_pct = ((total_count - missing_count) / total_count) * 100
+            print(f"Column '{col}': {missing_count} missing out of {total_count} ({completeness_pct:.2f}% complete)")
+    sys.stdout = original_stdout
+
+def compare_changes(old_gdf, new_gdf, id_col, compare_cols, cur_out_folder):
+    """ Compare two GeoDataFrames and log changes in specified columns
+
+    Parameters
+    ----------
+    old_gdf : geopandas.GeoDataFrame
+        previous version of the administrative bounds
+    new_gdf : geopandas.GeoDataFrame
+        current version of the administrative bounds
+    id_col : str
+        column containing primary key to join on
+    name_col : str
+        column containing name of the administrative unit
+    compare_cols : list
+        list of columns to compare between old and new GeoDataFrames
+    out_folder : str
+        folder where change logs will be written
+
+    Returns
+    ----------
+    geopandas.GeoDataFrame
+        new_gdf with additional columns indicating changes
+    """
+    if not os.path.exists(cur_out_folder):
+        os.makedirs(cur_out_folder) 
+    all_res = []
+    for idx, row in new_gdf.iterrows():
+        res = {'id':idx}
+        old_row = old_gdf[old_gdf[id_col] == row[id_col]]        
+        if old_row.shape[0] == 0:
+            res['new_record'] = True
+        else:
+            # compare geometries
+            old_geom = old_row.iloc[0]['geometry']
+            new_geom = row['geometry']        
+            res['area_change'] = new_geom.difference(old_geom).area/new_geom.area
+            #compare selected columns
+            for col in compare_cols:
+                res[f'{col}_changed'] = row[col] != old_row.iloc[0][col]
+        all_res.append(res)
+
+    changes_df = pd.DataFrame(all_res)
+    changes_df = pd.merge(new_gdf, changes_df, left_index=True, right_on='id')
+
+    for col in compare_cols:
+        n_changed = changes_df[f'{col}_changed'].sum()
+        if n_changed > 0:
+            print(f"Changes in {col}: {changes_df[f'{col}_changed'].sum()}")  
+            pd.DataFrame(changes_df.loc[changes_df[f'{col}_changed'] == True].drop(['geometry'], axis=1)).to_csv(os.path.join(cur_out_folder, f"{col}_changes.csv"))
+    return changes_df
+    
+
 def write_output(gdf, final_folder, filename):
     """ Write a GeoDataFrame to a better format (GPKG).
 
@@ -230,19 +310,23 @@ def write_output(gdf, final_folder, filename):
         path to the written file       
     """
     # Write to multiple formats
-    # write geopackage to file
-    gdf.to_file(os.path.join(final_folder, "gpkg", f"{filename}.gpkg"), driver='GPKG')
-    # write shapefile to file
-    gdf.to_file(os.path.join(final_folder, "shp", f"{filename}.shp"), driver='ESRI Shapefile')
-    # Write geojson to file
-    gdf.to_file(os.path.join(final_folder, "geojson", f"{filename}.geojson"), driver='GeoJSON')
-
-    # Project to equal-are projection; epsg: 8857
-    gdf = gdf.to_crs(epsg=8857)
-    gdf.to_file(os.path.join(final_folder, "gpkg", f"{filename}_equal_area.gpkg"), driver='GPKG')
-    gdf.to_file(os.path.join(final_folder, "shp", f"{filename}_equal_area.shp"), driver='ESRI Shapefile')
-    gdf.to_file(os.path.join(final_folder, "geojson", f"{filename}_equal_area.geojson"), driver='GeoJSON')
-
+    for crs in [4326, 8857]:
+        crs_folder = os.path.join(final_folder, f"crs_{crs}")
+        if not os.path.exists(crs_folder):
+            os.makedirs(crs_folder)
+            os.makedirs(os.path.join(crs_folder, "gpkg"))
+            os.makedirs(os.path.join(crs_folder, "shp"))
+            os.makedirs(os.path.join(crs_folder, "geojson"))
+            os.makedirs(os.path.join(crs_folder, "parquet"))
+        gdf_crs = gdf.to_crs(epsg=crs)
+        # write geopackage to file
+        gdf_crs.to_file(os.path.join(crs_folder, "gpkg", f"{filename}.gpkg"), driver='GPKG', encoding='utf-8-sig')
+        # write shapefile to file
+        gdf_crs.to_file(os.path.join(crs_folder, "shp", f"{filename}.shp"), driver='ESRI Shapefile', encoding='utf-8-sig')
+        # Write geojson to file
+        gdf_crs.to_file(os.path.join(crs_folder, "geojson", f"{filename}.geojson"), driver='GeoJSON', encoding='utf-8-sig')
+        # Write geoarquet
+        gdf_crs.to_parquet(os.path.join(crs_folder, "parquet", f"{filename}.parquet"), engine='pyarrow')
 ''' RETIRED
 Functions Below will hopefully be deleted eventually
 '''
