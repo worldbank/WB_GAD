@@ -8,6 +8,73 @@ import pandas as pd
 from shapely.geometry import Point, Polygon, box, shape
 from datetime import datetime
 
+
+def compare_national_shapes(adm0, adm1, adm2):
+    """ Compare the national shapes of ADM0, ADM1, and ADM2 for a given country
+
+    Parameters
+    ----------
+    adm0 : geopandas.GeoDataFrame
+        GeoDataFrame containing ADM0 boundaries
+    adm1 : geopandas.GeoDataFrame
+        GeoDataFrame containing ADM1 boundaries
+    adm2 : geopandas.GeoDataFrame
+        GeoDataFrame containing ADM2 boundaries
+
+    Returns
+    -------
+    dict
+        Dictionary containing the comparison results for ADM0, ADM1, and ADM2
+    """
+    
+    results = {}
+    
+    # Look for slivers and overlaps in ADM1 and ADM2
+    # Check for slivers in ADM1
+    def check_for_slivers_overlaps(gdf, id_col):
+        slivers = adm0.union_all().difference(gdf.union_all())
+        slivers = gpd.GeoDataFrame(geometry=[slivers], crs=adm0.crs)
+        slivers = slivers[~slivers.is_empty]
+        slivers = slivers.explode(index_parts=False).reset_index(drop=True)
+    
+        overlapping_pairs = gpd.sjoin(gdf, gdf, predicate="intersects", lsuffix="left", rsuffix="right")
+        overlapping_pairs = overlapping_pairs[overlapping_pairs.index != overlapping_pairs.index_right]
+        overlapping_index_pairs = set(overlapping_pairs.apply(lambda row: f"{row[id_col+'_left']}_{row[id_col+'_right']}", axis=1))
+
+        # Identify touching pairs
+        touching_pairs = gpd.sjoin(gdf, gdf, predicate="touches", lsuffix="left", rsuffix="right")
+        touching_index_pairs = set(touching_pairs.apply(lambda row: f"{row[id_col+'_left']}_{row[id_col+'_right']}", axis=1))
+
+        # Get difference between overlapping and touching pairs
+        unique_overlapping_pairs = overlapping_index_pairs - touching_index_pairs
+
+        if len(unique_overlapping_pairs) > 0:
+            res = {}
+            for overlap_pair in unique_overlapping_pairs:
+                left_id, right_id = overlap_pair.split('_')
+                # Sort the left_id and right_id alphabetically to ensure consistent ordering
+                left_id, right_id = sorted([left_id, right_id])
+                if not f"{left_id}_{right_id}" in res:
+                    left_geom = gdf.loc[gdf[id_col] == left_id, :]
+                    right_geom = gdf.loc[gdf[id_col] == right_id, :]                
+                    intersection = left_geom.union_all().intersection(right_geom.union_all())
+                    res[f"{left_id}_{right_id}"] = intersection
+            unique_overlapping_pairs = gpd.GeoDataFrame(pd.DataFrame(res.items(), 
+                                        columns=['ADM_CODES', 'geometry']), geometry='geometry', crs=gdf.crs)
+            unique_overlapping_pairs['geometry'] = unique_overlapping_pairs['geometry'].buffer(0)
+
+        return (slivers, unique_overlapping_pairs)
+    
+    adm1_slivers, adm1_overlaps = check_for_slivers_overlaps(adm1, "ADM1CD_c")
+    adm2_slivers, adm2_overlaps = check_for_slivers_overlaps(adm2, "ADM2CD_c")
+
+    results['ADM1_slivers'] = adm1_slivers
+    results['ADM1_overlaps'] = adm1_overlaps
+    results['ADM2_slivers'] = adm2_slivers
+    results['ADM2_overlaps'] = adm2_overlaps
+    
+    return results
+
 def get_wb_classifications(grouping_version='38.0', fmr_prod_base_url = "https://fmr.worldbank.org/FMR/sdmx/v2/structure/"): 
     """ Extract official World Bank regions and income classifications from Data360
 
@@ -229,15 +296,16 @@ def evaluate_data_completeness(in_df, cols_to_check, log_file):
     original_stdout = sys.stdout
     with open(log_file, 'a') as log_fh:
         # write the current date and time
-        log_fh.write(f"Date and Time: {datetime.now()}\n")
-        log_fh.write(f"\nEvaluating data completeness for columns: {', '.join(cols_to_check)}\n")
         log_fh.write("--------------------------------------------------\n")
+        log_fh.write(f"Date and Time: {datetime.now()}\n")
+        log_fh.write(f"\nEvaluating data completeness for columns: {', '.join(cols_to_check)}\n")        
         sys.stdout = log_fh
         for col in cols_to_check:
             missing_count = in_df[col].isnull().sum()
             total_count = len(in_df)
             completeness_pct = ((total_count - missing_count) / total_count) * 100
             print(f"Column '{col}': {missing_count} missing out of {total_count} ({completeness_pct:.2f}% complete)")
+        log_fh.write("--------------------------------------------------\n")
     sys.stdout = original_stdout
 
 def compare_changes(old_gdf, new_gdf, id_col, compare_cols, cur_out_folder):
@@ -291,7 +359,6 @@ def compare_changes(old_gdf, new_gdf, id_col, compare_cols, cur_out_folder):
             pd.DataFrame(changes_df.loc[changes_df[f'{col}_changed'] == True].drop(['geometry'], axis=1)).to_csv(os.path.join(cur_out_folder, f"{col}_changes.csv"))
     return changes_df
     
-
 def write_output(gdf, final_folder, filename):
     """ Write a GeoDataFrame to a better format (GPKG).
 
@@ -327,31 +394,8 @@ def write_output(gdf, final_folder, filename):
         gdf_crs.to_file(os.path.join(crs_folder, "geojson", f"{filename}.geojson"), driver='GeoJSON', encoding='utf-8-sig')
         # Write geoarquet
         gdf_crs.to_parquet(os.path.join(crs_folder, "parquet", f"{filename}.parquet"), engine='pyarrow')
+
 ''' RETIRED
 Functions Below will hopefully be deleted eventually
 '''
-def open_and_write_to_better_formats(filename, out_folder):
-    """ RETIRED Open a GeoDataFrame and write it to a better format (GPKG) if it doesn't already exist.
-
-    Parameters
-    ----------
-    filename : str
-        path to existing 
-    out_folder : str
-        url from which to access Data360 FMR, default is "https://fmr.worldbank.org/FMR/sdmx/v2/structure/"
-
-    Returns
-    ----------
-    pandas.DataFrame
-        Dataframe containing the group, value, and ISO3. This is a LONG format table       
-    """
-    out_file = os.path.join(out_folder, os.path.basename(filename).replace(".shp", ".gpkg"))
-    if not os.path.exists(out_file):
-        gdf = gpd.read_file(filename)
-        gdf.to_file(out_file, driver='GPKG')
-        print(f'Wrote {out_file}')
-    else:
-        gdf = gpd.read_file(out_file)
-        print(f'{out_file} already exists, skipping write.')
-    return gdf
 
